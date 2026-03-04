@@ -966,11 +966,11 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 				'id': 'gidlfommnbibbmegmgajdbikelkdcmcl',
 				'url': 'https://clients2.google.com/service/update2/crx?response=redirect&prodversion=133&acceptformat=crx3&x=id%3Dgidlfommnbibbmegmgajdbikelkdcmcl%26uc',
 			},
-			# {
-			# 	'name': 'Captcha Solver: Auto captcha solving service',
-			# 	'id': 'pgojnojmmhpofjgdmaebadhbocahppod',
-			# 	'url': 'https://clients2.google.com/service/update2/crx?response=redirect&prodversion=130&acceptformat=crx3&x=id%3Dpgojnojmmhpofjgdmaebadhbocahppod%26uc',
-			# },
+			{
+				'name': 'NopeCHA',
+				'id': 'dknlfmjaanfblgfdfebhijalfmhmjjjo',
+				'url': 'https://clients2.google.com/service/update2/crx?response=redirect&prodversion=133&acceptformat=crx3&x=id%3Ddknlfmjaanfblgfdfebhijalfmhmjjjo%26uc',
+			},
 			# Consent-O-Matic disabled - using uBlock Origin's cookie lists instead for simplicity
 			# {
 			# 	'name': 'Consent-O-Matic',
