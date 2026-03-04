@@ -971,6 +971,11 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 				'id': 'dknlfmjaanfblgfdfebhijalfmhmjjjo',
 				'url': 'https://clients2.google.com/service/update2/crx?response=redirect&prodversion=133&acceptformat=crx3&x=id%3Ddknlfmjaanfblgfdfebhijalfmhmjjjo%26uc',
 			},
+			{
+				'name': 'CapSolver',
+				'id': 'pgojnojmmhpofjgdmaebadhbocahppod',
+				'url': 'https://clients2.google.com/service/update2/crx?response=redirect&prodversion=133&acceptformat=crx3&x=id%3Dpgojnojmmhpofjgdmaebadhbocahppod%26uc',
+			},
 			# Consent-O-Matic disabled - using uBlock Origin's cookie lists instead for simplicity
 			# {
 			# 	'name': 'Consent-O-Matic',
@@ -1026,6 +1031,11 @@ class BrowserProfile(BrowserConnectArgs, BrowserLaunchPersistentContextArgs, Bro
 		for i, path in enumerate(extension_paths):
 			if loaded_extension_names[i] == "I still don't care about cookies":
 				self._apply_minimal_extension_patch(Path(path), self.cookie_whitelist_domains)
+
+		# Apply CapSolver config patch (API key from env, disable types handled by NopeCHA)
+		for i, path in enumerate(extension_paths):
+			if loaded_extension_names[i] == 'CapSolver':
+				self._apply_capsolver_config_patch(Path(path))
 
 		if extension_paths:
 			logger.debug(f'[BrowserProfile] 🧩 Extensions loaded ({len(extension_paths)}): [{", ".join(loaded_extension_names)}]')
@@ -1097,6 +1107,43 @@ async function initialize(checkInitialized, magic) {{
 
 		except Exception as e:
 			logger.debug(f'[BrowserProfile] Could not patch extension storage: {e}')
+
+	def _apply_capsolver_config_patch(self, ext_dir: Path) -> None:
+		"""Patch CapSolver extension config with API key from env and disable types handled by NopeCHA."""
+		try:
+			config_path = ext_dir / 'assets' / 'config.js'
+			if not config_path.exists():
+				logger.debug('[BrowserProfile] CapSolver config.js not found, skipping patch')
+				return
+
+			api_key = os.getenv('CAPSOLVER_API_KEY', '')
+
+			with open(config_path, encoding='utf-8') as f:
+				content = f.read()
+
+			# Patch API key
+			if api_key:
+				content = content.replace("apiKey: '',", f"apiKey: '{api_key}',")
+				content = content.replace('apiKey: "",', f"apiKey: '{api_key}',")
+
+			# Disable captcha types that NopeCHA handles for free (v2, image, AWS, Cloudflare).
+			# Only keep reCAPTCHA v3 enabled for CapSolver (NopeCHA can't solve invisible v3).
+			content = content.replace('enabledForRecaptcha: true', 'enabledForRecaptcha: false')
+			content = content.replace('enabledForImageToText: true', 'enabledForImageToText: false')
+			content = content.replace('enabledForAwsCaptcha: true', 'enabledForAwsCaptcha: false')
+			content = content.replace('enabledForCloudflare: true', 'enabledForCloudflare: false')
+			# Keep enabledForRecaptchaV3: true (the whole point of CapSolver)
+
+			with open(config_path, 'w', encoding='utf-8') as f:
+				f.write(content)
+
+			if api_key:
+				logger.info('[BrowserProfile] CapSolver configured with API key (reCAPTCHA v3 only)')
+			else:
+				logger.debug('[BrowserProfile] CapSolver loaded without API key (inactive until CAPSOLVER_API_KEY is set)')
+
+		except Exception as e:
+			logger.debug(f'[BrowserProfile] Could not patch CapSolver config: {e}')
 
 	def _download_extension(self, url: str, output_path: Path) -> None:
 		"""Download extension .crx file."""
