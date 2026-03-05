@@ -70,6 +70,51 @@ _INTERCEPTOR_JS = r"""(function() {
     obj.__v3Intercepted = true;
   }
 
+  // Watch for .execute being added to an object AFTER it's created.
+  // Google's reCAPTCHA v3 often does: window.grecaptcha = {} first,
+  // then adds .execute as a property later. Our window setter fires
+  // on the first assignment but .execute doesn't exist yet.
+  function watchForExecute(obj) {
+    if (!obj || obj.__v3Watched) return;
+    obj.__v3Watched = true;
+
+    // If execute already exists as a function, wrap it now
+    if (typeof obj.execute === 'function') {
+      wrapExecute(obj);
+      return;
+    }
+
+    // Watch for execute being defined later via property assignment
+    var _currentExecute = obj.execute;
+    try {
+      Object.defineProperty(obj, 'execute', {
+        configurable: true,
+        enumerable: true,
+        get: function() { return _currentExecute; },
+        set: function(fn) {
+          _currentExecute = fn;
+          if (typeof fn === 'function' && !obj.__v3Intercepted) {
+            // execute was just defined! Convert back to normal property and wrap.
+            delete obj.execute;
+            obj.execute = fn;
+            wrapExecute(obj);
+          }
+        }
+      });
+    } catch (e) {
+      // defineProperty failed -- fall back to polling
+      var pollCount = 0;
+      var pollInterval = setInterval(function() {
+        pollCount++;
+        if (typeof obj.execute === 'function' && !obj.__v3Intercepted) {
+          clearInterval(pollInterval);
+          wrapExecute(obj);
+        }
+        if (pollCount > 50) clearInterval(pollInterval); // give up after 10s
+      }, 200);
+    }
+  }
+
   // Intercept grecaptcha when Google's script assigns it to window
   var _grecaptcha = window.grecaptcha;
   Object.defineProperty(window, 'grecaptcha', {
@@ -79,17 +124,17 @@ _INTERCEPTOR_JS = r"""(function() {
     set: function(val) {
       _grecaptcha = val;
       if (val) {
-        wrapExecute(val);
-        if (val.enterprise) wrapExecute(val.enterprise);
+        watchForExecute(val);
+        if (val.enterprise) watchForExecute(val.enterprise);
       }
     }
   });
 
   // Handle if already set (unlikely with runImmediately, but safe)
   if (window.grecaptcha) {
-    wrapExecute(window.grecaptcha);
+    watchForExecute(window.grecaptcha);
     if (window.grecaptcha && window.grecaptcha.enterprise) {
-      wrapExecute(window.grecaptcha.enterprise);
+      watchForExecute(window.grecaptcha.enterprise);
     }
   }
 })();"""
