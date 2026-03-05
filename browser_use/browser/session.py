@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import time
 from functools import cached_property
 from pathlib import Path
@@ -527,6 +528,7 @@ class BrowserSession(BaseModel):
 	_permissions_watchdog: Any | None = PrivateAttr(default=None)
 	_recording_watchdog: Any | None = PrivateAttr(default=None)
 	_captcha_watchdog: Any | None = PrivateAttr(default=None)
+	_recaptcha_v3_solver_watchdog: Any | None = PrivateAttr(default=None)
 	_watchdogs_attached: bool = PrivateAttr(default=False)
 
 	_cloud_browser_client: CloudBrowserClient = PrivateAttr(default_factory=lambda: CloudBrowserClient())
@@ -1669,6 +1671,14 @@ class BrowserSession(BaseModel):
 			CaptchaWatchdog.model_rebuild()
 			self._captcha_watchdog = CaptchaWatchdog(event_bus=self.event_bus, browser_session=self)
 			self._captcha_watchdog.attach_to_session()
+
+		# Initialize RecaptchaV3SolverWatchdog (intercepts grecaptcha.execute via CDP)
+		if os.getenv('CAPSOLVER_API_KEY'):
+			from browser_use.browser.watchdogs.recaptcha_v3_solver_watchdog import RecaptchaV3SolverWatchdog
+
+			RecaptchaV3SolverWatchdog.model_rebuild()
+			self._recaptcha_v3_solver_watchdog = RecaptchaV3SolverWatchdog(event_bus=self.event_bus, browser_session=self)
+			self._recaptcha_v3_solver_watchdog.attach_to_session()
 
 		# Mark watchdogs as attached to prevent duplicate attachment
 		self._watchdogs_attached = True
