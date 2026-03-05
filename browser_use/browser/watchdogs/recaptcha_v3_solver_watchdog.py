@@ -47,13 +47,13 @@ _INTERCEPTOR_JS = r"""(function() {
     }
   };
 
-  function wrapExecute(obj) {
+  function wrapExecute(obj, isEnterprise) {
     if (!obj || typeof obj.execute !== 'function' || obj.__v3Intercepted) return;
-    console.warn(TAG, 'Wrapping grecaptcha.execute()');
+    console.warn(TAG, 'Wrapping grecaptcha' + (isEnterprise ? '.enterprise' : '') + '.execute()');
     var origExecute = obj.execute.bind(obj);
     obj.execute = function(siteKey, options) {
       var id = ++requestCounter;
-      console.warn(TAG, 'grecaptcha.execute() intercepted! id=' + id + ' siteKey=' + siteKey + ' action=' + ((options && options.action) || ''));
+      console.warn(TAG, 'grecaptcha' + (isEnterprise ? '.enterprise' : '') + '.execute() intercepted! id=' + id + ' siteKey=' + siteKey + ' action=' + ((options && options.action) || ''));
       return new Promise(function(resolve, reject) {
         pendingRequests[id] = {
           resolve: resolve,
@@ -73,7 +73,8 @@ _INTERCEPTOR_JS = r"""(function() {
             id: id,
             siteKey: siteKey,
             action: (options && options.action) || '',
-            pageUrl: window.location.href
+            pageUrl: window.location.href,
+            isEnterprise: !!isEnterprise
           }));
           console.warn(TAG, 'CDP binding called successfully for id=' + id);
         } catch (e) {
@@ -91,18 +92,18 @@ _INTERCEPTOR_JS = r"""(function() {
   // Google's reCAPTCHA v3 often does: window.grecaptcha = {} first,
   // then adds .execute as a property later. Our window setter fires
   // on the first assignment but .execute doesn't exist yet.
-  function watchForExecute(obj) {
+  function watchForExecute(obj, isEnterprise) {
     if (!obj || obj.__v3Watched) return;
     obj.__v3Watched = true;
 
     // If execute already exists as a function, wrap it now
     if (typeof obj.execute === 'function') {
-      console.warn(TAG, 'execute already exists on object, wrapping now');
-      wrapExecute(obj);
+      console.warn(TAG, 'execute already exists on object, wrapping now (enterprise=' + !!isEnterprise + ')');
+      wrapExecute(obj, isEnterprise);
       return;
     }
 
-    console.warn(TAG, 'execute not yet on object, setting up defineProperty watcher');
+    console.warn(TAG, 'execute not yet on object, setting up defineProperty watcher (enterprise=' + !!isEnterprise + ')');
 
     // Watch for execute being defined later via property assignment
     var _currentExecute = obj.execute;
@@ -112,13 +113,13 @@ _INTERCEPTOR_JS = r"""(function() {
         enumerable: true,
         get: function() { return _currentExecute; },
         set: function(fn) {
-          console.warn(TAG, 'execute property setter fired, type=' + typeof fn);
+          console.warn(TAG, 'execute property setter fired, type=' + typeof fn + ' (enterprise=' + !!isEnterprise + ')');
           _currentExecute = fn;
           if (typeof fn === 'function' && !obj.__v3Intercepted) {
             // execute was just defined! Convert back to normal property and wrap.
             delete obj.execute;
             obj.execute = fn;
-            wrapExecute(obj);
+            wrapExecute(obj, isEnterprise);
           }
         }
       });
@@ -132,7 +133,7 @@ _INTERCEPTOR_JS = r"""(function() {
         if (typeof obj.execute === 'function' && !obj.__v3Intercepted) {
           console.warn(TAG, 'Polling found execute at attempt ' + pollCount);
           clearInterval(pollInterval);
-          wrapExecute(obj);
+          wrapExecute(obj, isEnterprise);
         }
         if (pollCount > 50) clearInterval(pollInterval); // give up after 10s
       }, 200);
@@ -149,10 +150,10 @@ _INTERCEPTOR_JS = r"""(function() {
       console.warn(TAG, 'window.grecaptcha setter fired, type=' + typeof val, val ? ('keys=' + Object.keys(val).join(',')) : '');
       _grecaptcha = val;
       if (val) {
-        watchForExecute(val);
+        watchForExecute(val, false);
         if (val.enterprise) {
           console.warn(TAG, 'Also watching val.enterprise');
-          watchForExecute(val.enterprise);
+          watchForExecute(val.enterprise, true);
         }
       }
     }
@@ -162,9 +163,9 @@ _INTERCEPTOR_JS = r"""(function() {
   // Handle if already set (unlikely with runImmediately, but safe)
   if (window.grecaptcha) {
     console.warn(TAG, 'grecaptcha already exists at script load time!');
-    watchForExecute(window.grecaptcha);
+    watchForExecute(window.grecaptcha, false);
     if (window.grecaptcha && window.grecaptcha.enterprise) {
-      watchForExecute(window.grecaptcha.enterprise);
+      watchForExecute(window.grecaptcha.enterprise, true);
     }
   }
 
@@ -277,9 +278,10 @@ class RecaptchaV3SolverWatchdog(BaseWatchdog):
 				self.logger.info('RecaptchaV3Solver: Self-test PASSED -- CDP binding bridge is working')
 				return
 
+			is_enterprise = payload.get('isEnterprise', False)
 			self.logger.info(
-				f"RecaptchaV3Solver: Intercepted grecaptcha.execute("
-				f"siteKey={payload['siteKey']}, action={payload['action']}) "
+				f"RecaptchaV3Solver: Intercepted grecaptcha{'enterprise.' if is_enterprise else '.'}"
+				f"execute(siteKey={payload['siteKey']}, action={payload['action']}) "
 				f"on {payload['pageUrl']}"
 			)
 
@@ -290,6 +292,7 @@ class RecaptchaV3SolverWatchdog(BaseWatchdog):
 					site_key=payload['siteKey'],
 					action=payload['action'],
 					page_url=payload['pageUrl'],
+					is_enterprise=is_enterprise,
 					execution_context_id=execution_context_id,
 				)
 			)
@@ -306,11 +309,12 @@ class RecaptchaV3SolverWatchdog(BaseWatchdog):
 		site_key: str,
 		action: str,
 		page_url: str,
+		is_enterprise: bool = False,
 		execution_context_id: int | None = None,
 	) -> None:
 		"""Call CapSolver API and resolve the pending Promise in page JS."""
 		try:
-			token = await self._call_capsolver_api(site_key, action, page_url)
+			token = await self._call_capsolver_api(site_key, action, page_url, is_enterprise)
 			escaped_token = json.dumps(token)
 			js = f'window.__recaptchaV3Callback({request_id}, {escaped_token}, null)'
 			self.logger.info(f'RecaptchaV3Solver: Token received, resolving promise (request={request_id})')
@@ -331,20 +335,22 @@ class RecaptchaV3SolverWatchdog(BaseWatchdog):
 		except Exception:
 			self.logger.exception('RecaptchaV3Solver: Failed to evaluate callback in page context')
 
-	async def _call_capsolver_api(self, site_key: str, action: str, page_url: str) -> str:
+	async def _call_capsolver_api(self, site_key: str, action: str, page_url: str, is_enterprise: bool = False) -> str:
 		"""Call CapSolver API to solve reCAPTCHA v3 and return the token."""
 		async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=65.0)) as client:
-			# Create task
-			self.logger.debug(f'RecaptchaV3Solver: Creating CapSolver task (siteKey={site_key}, action={action})')
+			# Use Enterprise task type if the site uses grecaptcha.enterprise
+			task_type = 'ReCaptchaV3EnterpriseTaskProxyless' if is_enterprise else 'ReCaptchaV3TaskProxyless'
+			self.logger.info(f'RecaptchaV3Solver: Creating CapSolver task (type={task_type}, siteKey={site_key}, action={action}, enterprise={is_enterprise})')
 			create_resp = await client.post(
 				'https://api.capsolver.com/createTask',
 				json={
 					'clientKey': self._api_key,
 					'task': {
-						'type': 'ReCaptchaV3TaskProxyless',
+						'type': task_type,
 						'websiteURL': page_url,
 						'websiteKey': site_key,
 						'pageAction': action,
+						'minScore': 0.9,
 					},
 				},
 			)
