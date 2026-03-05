@@ -336,11 +336,37 @@ class RecaptchaV3SolverWatchdog(BaseWatchdog):
 			self.logger.exception('RecaptchaV3Solver: Failed to evaluate callback in page context')
 
 	async def _call_capsolver_api(self, site_key: str, action: str, page_url: str, is_enterprise: bool = False) -> str:
-		"""Call CapSolver API to solve reCAPTCHA v3 and return the token."""
+		"""Call CapSolver API to solve reCAPTCHA v3 and return the token.
+
+		Uses a fallback strategy: when grecaptcha.execute() is detected (not explicitly
+		Enterprise), tries Enterprise first because sites can load enterprise.js which
+		aliases grecaptcha.execute() = grecaptcha.enterprise.execute(). If Enterprise
+		fails, falls back to standard v3.
+		"""
+		# When JS explicitly detected Enterprise, use that. Otherwise try Enterprise
+		# first (covers the alias case), then fall back to standard.
+		if is_enterprise:
+			task_types = ['ReCaptchaV3EnterpriseTaskProxyless']
+		else:
+			task_types = ['ReCaptchaV3EnterpriseTaskProxyless', 'ReCaptchaV3TaskProxyless']
+
+		last_error = None
+		for task_type in task_types:
+			try:
+				token = await self._create_and_poll_task(task_type, site_key, action, page_url)
+				return token
+			except RuntimeError as e:
+				last_error = e
+				if len(task_types) > 1:
+					self.logger.info(f'RecaptchaV3Solver: {task_type} failed ({e}), trying next type...')
+				continue
+
+		raise last_error or RuntimeError('All CapSolver task types failed')
+
+	async def _create_and_poll_task(self, task_type: str, site_key: str, action: str, page_url: str) -> str:
+		"""Create a CapSolver task and poll for the result."""
 		async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=65.0)) as client:
-			# Use Enterprise task type if the site uses grecaptcha.enterprise
-			task_type = 'ReCaptchaV3EnterpriseTaskProxyless' if is_enterprise else 'ReCaptchaV3TaskProxyless'
-			self.logger.info(f'RecaptchaV3Solver: Creating CapSolver task (type={task_type}, siteKey={site_key}, action={action}, enterprise={is_enterprise})')
+			self.logger.info(f'RecaptchaV3Solver: Creating CapSolver task (type={task_type}, siteKey={site_key}, action={action})')
 			create_resp = await client.post(
 				'https://api.capsolver.com/createTask',
 				json={
@@ -379,7 +405,7 @@ class RecaptchaV3SolverWatchdog(BaseWatchdog):
 
 				if result_data.get('status') == 'ready':
 					token = result_data['solution']['gRecaptchaResponse']
-					self.logger.debug(f'RecaptchaV3Solver: Token received after {(attempt + 1) * 2}s')
+					self.logger.info(f'RecaptchaV3Solver: Token received via {task_type} after {(attempt + 1) * 2}s')
 					return token
 
-			raise TimeoutError('CapSolver task timed out after 60s')
+			raise TimeoutError(f'CapSolver {task_type} task timed out after 60s')
