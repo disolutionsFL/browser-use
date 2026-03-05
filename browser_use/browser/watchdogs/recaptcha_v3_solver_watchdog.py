@@ -26,8 +26,11 @@ from browser_use.browser.watchdog_base import BaseWatchdog
 # Runs before any page script (runImmediately=True), intercepting grecaptcha.execute()
 # when Google's reCAPTCHA v3 script assigns it to window.grecaptcha.
 _INTERCEPTOR_JS = r"""(function() {
+  var TAG = '[RecaptchaV3Interceptor]';
   var pendingRequests = {};
   var requestCounter = 0;
+
+  console.warn(TAG, 'Script loaded, setting up interceptor');
 
   // Called by Python (via Runtime.evaluate) to resolve/reject pending promises
   window.__recaptchaV3Callback = function(id, token, error) {
@@ -35,24 +38,36 @@ _INTERCEPTOR_JS = r"""(function() {
     if (!pending) return;
     delete pendingRequests[id];
     if (error) {
+      console.warn(TAG, 'Solver error, falling back to original execute for id=' + id);
       // Fall back to original grecaptcha.execute
       pending.fallback().then(pending.resolve).catch(pending.reject);
     } else {
+      console.warn(TAG, 'Token received from solver for id=' + id);
       pending.resolve(token);
     }
   };
 
   function wrapExecute(obj) {
     if (!obj || typeof obj.execute !== 'function' || obj.__v3Intercepted) return;
+    console.warn(TAG, 'Wrapping grecaptcha.execute()');
     var origExecute = obj.execute.bind(obj);
     obj.execute = function(siteKey, options) {
       var id = ++requestCounter;
+      console.warn(TAG, 'grecaptcha.execute() intercepted! id=' + id + ' siteKey=' + siteKey + ' action=' + ((options && options.action) || ''));
       return new Promise(function(resolve, reject) {
         pendingRequests[id] = {
           resolve: resolve,
           reject: reject,
           fallback: function() { return origExecute(siteKey, options); }
         };
+        var bindingAvailable = typeof window.__recaptchaV3Request === 'function';
+        console.warn(TAG, 'CDP binding available: ' + bindingAvailable);
+        if (!bindingAvailable) {
+          console.warn(TAG, 'No CDP binding, falling back to original execute');
+          delete pendingRequests[id];
+          origExecute(siteKey, options).then(resolve).catch(reject);
+          return;
+        }
         try {
           window.__recaptchaV3Request(JSON.stringify({
             id: id,
@@ -60,8 +75,10 @@ _INTERCEPTOR_JS = r"""(function() {
             action: (options && options.action) || '',
             pageUrl: window.location.href
           }));
+          console.warn(TAG, 'CDP binding called successfully for id=' + id);
         } catch (e) {
-          // CDP binding not available -- fall back to original
+          // CDP binding threw -- fall back to original
+          console.warn(TAG, 'CDP binding threw: ' + e.message + ', falling back');
           delete pendingRequests[id];
           origExecute(siteKey, options).then(resolve).catch(reject);
         }
@@ -80,9 +97,12 @@ _INTERCEPTOR_JS = r"""(function() {
 
     // If execute already exists as a function, wrap it now
     if (typeof obj.execute === 'function') {
+      console.warn(TAG, 'execute already exists on object, wrapping now');
       wrapExecute(obj);
       return;
     }
+
+    console.warn(TAG, 'execute not yet on object, setting up defineProperty watcher');
 
     // Watch for execute being defined later via property assignment
     var _currentExecute = obj.execute;
@@ -92,6 +112,7 @@ _INTERCEPTOR_JS = r"""(function() {
         enumerable: true,
         get: function() { return _currentExecute; },
         set: function(fn) {
+          console.warn(TAG, 'execute property setter fired, type=' + typeof fn);
           _currentExecute = fn;
           if (typeof fn === 'function' && !obj.__v3Intercepted) {
             // execute was just defined! Convert back to normal property and wrap.
@@ -101,12 +122,15 @@ _INTERCEPTOR_JS = r"""(function() {
           }
         }
       });
+      console.warn(TAG, 'defineProperty watcher installed on object');
     } catch (e) {
+      console.warn(TAG, 'defineProperty failed: ' + e.message + ', falling back to polling');
       // defineProperty failed -- fall back to polling
       var pollCount = 0;
       var pollInterval = setInterval(function() {
         pollCount++;
         if (typeof obj.execute === 'function' && !obj.__v3Intercepted) {
+          console.warn(TAG, 'Polling found execute at attempt ' + pollCount);
           clearInterval(pollInterval);
           wrapExecute(obj);
         }
@@ -122,21 +146,41 @@ _INTERCEPTOR_JS = r"""(function() {
     enumerable: true,
     get: function() { return _grecaptcha; },
     set: function(val) {
+      console.warn(TAG, 'window.grecaptcha setter fired, type=' + typeof val, val ? ('keys=' + Object.keys(val).join(',')) : '');
       _grecaptcha = val;
       if (val) {
         watchForExecute(val);
-        if (val.enterprise) watchForExecute(val.enterprise);
+        if (val.enterprise) {
+          console.warn(TAG, 'Also watching val.enterprise');
+          watchForExecute(val.enterprise);
+        }
       }
     }
   });
+  console.warn(TAG, 'window.grecaptcha property trap installed');
 
   // Handle if already set (unlikely with runImmediately, but safe)
   if (window.grecaptcha) {
+    console.warn(TAG, 'grecaptcha already exists at script load time!');
     watchForExecute(window.grecaptcha);
     if (window.grecaptcha && window.grecaptcha.enterprise) {
       watchForExecute(window.grecaptcha.enterprise);
     }
   }
+
+  // Self-test: verify CDP binding is reachable
+  setTimeout(function() {
+    var available = typeof window.__recaptchaV3Request === 'function';
+    console.warn(TAG, 'Self-test (1s): CDP binding available = ' + available);
+    if (available) {
+      try {
+        window.__recaptchaV3Request(JSON.stringify({id: 0, siteKey: '__selftest__', action: '__selftest__', pageUrl: window.location.href}));
+        console.warn(TAG, 'Self-test: binding call succeeded');
+      } catch (e) {
+        console.warn(TAG, 'Self-test: binding call threw: ' + e.message);
+      }
+    }
+  }, 1000);
 })();"""
 
 
@@ -181,12 +225,19 @@ class RecaptchaV3SolverWatchdog(BaseWatchdog):
 			# Register event handler on root CDP client (catches events from all targets)
 			self.browser_session.cdp_client.register.Runtime.bindingCalled(self._on_binding_called)
 
-			# Register the CDP binding on the current target
+			# Enable Runtime domain (required for Runtime.bindingCalled events to be dispatched)
 			cdp_session = await self.browser_session.get_or_create_cdp_session()
+			await cdp_session.cdp_client.send.Runtime.enable(
+				session_id=cdp_session.session_id,
+			)
+			self.logger.debug('RecaptchaV3Solver: Runtime domain enabled')
+
+			# Register the CDP binding on the current target
 			await cdp_session.cdp_client.send.Runtime.addBinding(
 				params={'name': '__recaptchaV3Request'},
 				session_id=cdp_session.session_id,
 			)
+			self.logger.debug('RecaptchaV3Solver: CDP binding registered')
 
 			# Inject the interceptor script (runs before page JS on every navigation)
 			self._script_id = await self.browser_session._cdp_add_init_script(_INTERCEPTOR_JS)
@@ -220,6 +271,11 @@ class RecaptchaV3SolverWatchdog(BaseWatchdog):
 		try:
 			payload = json.loads(event_data['payload'])
 			execution_context_id = event_data.get('executionContextId')
+
+			# Handle self-test from injected JS
+			if payload.get('siteKey') == '__selftest__':
+				self.logger.info('RecaptchaV3Solver: Self-test PASSED -- CDP binding bridge is working')
+				return
 
 			self.logger.info(
 				f"RecaptchaV3Solver: Intercepted grecaptcha.execute("
