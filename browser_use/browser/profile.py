@@ -1134,6 +1134,10 @@ async function initialize(checkInitialized, magic) {{
 			content = content.replace('enabledForCloudflare: true', 'enabledForCloudflare: false')
 			# Keep enabledForRecaptchaV3: true (the whole point of CapSolver)
 
+			# reCAPTCHA v3 is invisible (no checkbox/images to click). Use 'token' mode
+			# so the extension intercepts grecaptcha.execute() and injects a server-generated token.
+			content = content.replace("reCaptchaMode: 'click'", "reCaptchaMode: 'token'")
+
 			with open(config_path, 'w', encoding='utf-8') as f:
 				f.write(content)
 
