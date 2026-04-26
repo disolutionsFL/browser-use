@@ -2547,7 +2547,17 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self.logger.debug(
 				f'🔄 Starting main execution loop with max {max_steps} steps (currently at step {self.state.n_steps})...'
 			)
-			while self.state.n_steps <= max_steps:
+			# Effective ceiling: starts at max_steps, can be extended at runtime by
+			# setting agent.state.max_steps_override (typically from on_step_end when
+			# the agent is making progress and approaching the budget).
+			effective_max_steps = max_steps
+			while self.state.n_steps <= effective_max_steps:
+				override = getattr(self.state, 'max_steps_override', None)
+				if override is not None and override > effective_max_steps:
+					self.logger.info(
+						f'🔼 max_steps extended {effective_max_steps} -> {override} via agent.state.max_steps_override'
+					)
+					effective_max_steps = override
 				current_step = self.state.n_steps - 1  # Convert to 0-indexed for step_info
 
 				# Use the consolidated pause state management
@@ -2570,8 +2580,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					agent_run_error = 'Agent stopped programmatically'
 					break
 
-				step_info = AgentStepInfo(step_number=current_step, max_steps=max_steps)
-				is_done = await self._execute_step(current_step, max_steps, step_info, on_step_start, on_step_end)
+				step_info = AgentStepInfo(step_number=current_step, max_steps=effective_max_steps)
+				is_done = await self._execute_step(current_step, effective_max_steps, step_info, on_step_start, on_step_end)
 
 				if is_done:
 					# Agent has marked the task as done
