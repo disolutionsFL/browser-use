@@ -59,6 +59,10 @@ class ChatOpenAI(BaseChatModel):
 	max_retries: int = 5  # Increase default retries for automation reliability
 	default_headers: Mapping[str, str] | None = None
 	default_query: Mapping[str, object] | None = None
+	# extra_body is merged into every chat.completions.create() request body. Useful for OpenAI-compat
+	# providers (vLLM, etc.) that accept non-standard fields, e.g. Qwen3 thinking control via
+	# {"chat_template_kwargs": {"enable_thinking": False}}.
+	extra_body: Mapping[str, Any] | None = None
 	http_client: httpx.AsyncClient | None = None
 	_strict_response_validation: bool = False
 	max_completion_tokens: int | None = 4096
@@ -190,6 +194,9 @@ class ChatOpenAI(BaseChatModel):
 				model_params['reasoning_effort'] = self.reasoning_effort
 				model_params.pop('temperature', None)
 				model_params.pop('frequency_penalty', None)
+
+			if self.extra_body is not None:
+				model_params['extra_body'] = dict(self.extra_body)
 
 			if output_format is None:
 				# Return string response
