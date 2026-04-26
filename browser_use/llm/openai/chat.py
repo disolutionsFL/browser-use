@@ -21,6 +21,38 @@ from browser_use.llm.views import ChatInvokeCompletion, ChatInvokeUsage
 T = TypeVar('T', bound=BaseModel)
 
 
+def _extract_json_from_text(text: str) -> str:
+	"""Best-effort extraction of a JSON object embedded in free-form model output.
+
+	Local models (especially with response_format disabled) often wrap their JSON in
+	preamble text, markdown code fences, or structured tags. Strip the wrapper before
+	handing to Pydantic. Returns the original text if no candidate is found.
+	"""
+	s = text.strip()
+	# Strip markdown code fence: ```json ... ``` or ``` ... ```
+	if s.startswith('```'):
+		nl = s.find('\n')
+		if nl > 0:
+			s = s[nl + 1 :]
+		if s.endswith('```'):
+			s = s[:-3]
+		s = s.strip()
+	# If still wrapped in prose, extract the outermost { ... } block.
+	if s and s[0] != '{':
+		first = s.find('{')
+		if first >= 0:
+			depth = 0
+			for i in range(first, len(s)):
+				c = s[i]
+				if c == '{':
+					depth += 1
+				elif c == '}':
+					depth -= 1
+					if depth == 0:
+						return s[first : i + 1]
+	return s
+
+
 @dataclass
 class ChatOpenAI(BaseChatModel):
 	"""
@@ -288,7 +320,14 @@ class ChatOpenAI(BaseChatModel):
 
 				usage = self._get_usage(response)
 
-				parsed = output_format.model_validate_json(choice.message.content)
+				try:
+					parsed = output_format.model_validate_json(choice.message.content)
+				except ValueError:
+					# Local models often wrap JSON in preamble text, markdown fences, or
+					# structured tags when response_format is disabled. Try once more
+					# with lenient extraction before surfacing the error.
+					cleaned = _extract_json_from_text(choice.message.content)
+					parsed = output_format.model_validate_json(cleaned)
 
 				return ChatInvokeCompletion(
 					completion=parsed,
