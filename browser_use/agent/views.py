@@ -273,6 +273,12 @@ class AgentState(BaseModel):
 	# Loop detection state
 	loop_detector: ActionLoopDetector = Field(default_factory=ActionLoopDetector)
 
+	# Optional override for max_steps. When set (e.g. by an on_step_end callback),
+	# the main run loop will raise its effective ceiling to this value as long as it
+	# exceeds the original max_steps argument. Used for dynamic step extension when
+	# the agent is approaching its budget but still making progress.
+	max_steps_override: int | None = None
+
 
 @dataclass
 class AgentStepInfo:
