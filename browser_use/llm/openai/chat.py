@@ -1,3 +1,4 @@
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar, overload
@@ -21,11 +22,15 @@ from browser_use.llm.views import ChatInvokeCompletion, ChatInvokeUsage
 T = TypeVar('T', bound=BaseModel)
 
 
+_SPECIAL_TOKEN_RE = re.compile(r'<\|[^|]*?\|>|\[\|[^|]*?\|\]')
+
+
 def _extract_json_from_text(text: str) -> str:
 	"""Best-effort extraction of a JSON object embedded in free-form model output.
 
 	Local models (especially with response_format disabled) often wrap their JSON in
-	preamble text, markdown code fences, or structured tags. Strip the wrapper before
+	preamble text, markdown code fences, structured tags, or trailing tokenizer
+	artifacts (`<|mask_end|>`, `[|mask_end|]`, `</step5>`). Strip the wrapper before
 	handing to Pydantic. Returns the original text if no candidate is found.
 	"""
 	s = text.strip()
@@ -37,19 +42,35 @@ def _extract_json_from_text(text: str) -> str:
 		if s.endswith('```'):
 			s = s[:-3]
 		s = s.strip()
-	# If still wrapped in prose, extract the outermost { ... } block.
-	if s and s[0] != '{':
-		first = s.find('{')
-		if first >= 0:
-			depth = 0
-			for i in range(first, len(s)):
-				c = s[i]
-				if c == '{':
-					depth += 1
-				elif c == '}':
-					depth -= 1
-					if depth == 0:
-						return s[first : i + 1]
+	# Strip Qwen-style special token leaks like <|mask_end|> or [|mask_end|]
+	s = _SPECIAL_TOKEN_RE.sub('', s).strip()
+	# Extract the outermost { ... } block, string-aware so braces inside
+	# string literals don't end the scan early. Always runs (even if `s`
+	# starts with `{`) so that trailing junk after the closing `}` is stripped.
+	first = s.find('{')
+	if first < 0:
+		return s
+	depth = 0
+	in_string = False
+	escape = False
+	for i in range(first, len(s)):
+		c = s[i]
+		if in_string:
+			if escape:
+				escape = False
+			elif c == '\\':
+				escape = True
+			elif c == '"':
+				in_string = False
+		else:
+			if c == '"':
+				in_string = True
+			elif c == '{':
+				depth += 1
+			elif c == '}':
+				depth -= 1
+				if depth == 0:
+					return s[first : i + 1]
 	return s
 
 
